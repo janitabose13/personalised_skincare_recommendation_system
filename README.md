@@ -39,7 +39,7 @@ personalised_skincare_recommendation_system/
 git clone https://github.com/janitabose13/personalised_skincare_recommendation_system.git
 cd personalised_skincare_recommendation_system
 
-2.Create a virtual environment:
+2. Create a virtual environment:
 ```bash
 python -m venv venv
 source venv/bin/activate   # Mac/Linux
