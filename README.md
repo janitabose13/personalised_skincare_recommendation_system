@@ -40,17 +40,6 @@ git clone https://github.com/janitabose13/personalised_skincare_recommendation_s
 cd personalised_skincare_recommendation_system
 
 
-2. Create a virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate   # Mac/Linux
-
-
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-
-
 
 
 
