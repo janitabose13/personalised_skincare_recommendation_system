@@ -39,7 +39,9 @@ BASE = "https://incidecoder.com"
 
 def extract_all_ingredients():
     """
-    Shared with ewg_scraper — parse every unique ingredient from Nykaa data.
+    Parse every product ingredient list from nykaa_products.csv.
+    Returns sorted list of ALL unique lowercase INCI ingredient names
+    that pass text quality filters — no frequency cutoff.
     """
     nykaa_file = "data/raw/nykaa_products.csv"
     if not os.path.exists(nykaa_file):
@@ -51,20 +53,43 @@ def extract_all_ingredients():
     rows = df["ingredients"].dropna().tolist()
     print(f"Parsing ingredients from {len(rows):,} products...")
 
+    SENTENCE_WORDS = {
+        "use", "apply", "avoid", "keep", "store", "wash", "rinse",
+        "contact", "eyes", "external", "only", "children", "reach",
+        "consult", "doctor", "dermatologist", "tested", "patch",
+        "test", "discontinue", "result", "stop", "using", "contains",
+        "certified", "organic", "formula", "product", "ingredient",
+        "made", "india", "imported", "manufactured", "distributed",
+        "marketed", "registered", "trademark", "suitable",
+        "recommended", "direction", "instruction", "warning",
+        "caution", "note", "important", "please", "before", "after",
+        "during", "first", "second", "third", "step", "percent",
+        "weight", "volume", "quantity", "amount",
+    }
+
     unique = set()
     for ing_str in rows:
         parts = re.split(r",", str(ing_str))
         for part in parts:
-            cleaned = re.sub(r"[\[\]\(\)\*\+\d%°]", "", part)
+            cleaned = re.sub(r"[\[\]\(\)\*\+\d%°©®™]", "", part)
             cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
-            if len(cleaned) < 3 or len(cleaned) > 80:
+            cleaned = re.sub(r'^[-\'"._\s]+', '', cleaned).strip()
+            cleaned = re.sub(r'[-\'"._\s]+$', '', cleaned).strip()
+            if len(cleaned) < 3 or len(cleaned) > 60:
                 continue
-            if re.search(r"[:;=&]", cleaned):
+            if not re.search(r"[a-z]", cleaned):
                 continue
-            if any(w in cleaned for w in [
-                "may contain", "contains", "ingredient", "formula",
-                "free from", "does not", "without", "certified",
-            ]):
+            if re.search(r"[:;=&@#/\\<>]", cleaned):
+                continue
+            if re.search(r"\.\s", cleaned) or cleaned.endswith("."):
+                continue
+            if len(set(cleaned.split()) & SENTENCE_WORDS) >= 2:
+                continue
+            if re.search(r"^\d", cleaned):
+                continue
+            if re.search(r"\.com|www\.", cleaned):
+                continue
+            if len(cleaned.split()) > 6:
                 continue
             unique.add(cleaned)
 
@@ -232,17 +257,89 @@ def parse_inci_page(soup, page_text, name):
                 description = txt; break
         if description: break
 
-    # ── Irritancy (INCIDecoder + known list) ─────────────────────────────────
-    irritancy = classify_irritancy(name)
-    if "high irritancy" in t or "strong irritant" in t:   irritancy = "high"
-    elif "moderate irritan" in t or "irritant" in t:      irritancy = max(irritancy, "medium") if irritancy != "high" else "high"
+    # ── Irritancy ─────────────────────────────────────────────────────────────
+    # INCIDecoder shows irritancy as a 0-5 number, same format as comedogenicity.
+    # Displayed as "irr." value on ingredient page.
+    irritancy_score = None
 
-    # ── Comedogenicity (INCIDecoder + Fulton scale lookup) ───────────────────
-    comedogen_score = classify_comedogenicity(name)
-    # Try to parse from page text
-    m = re.search(r"comedogenic(?:ity)?\s+(?:rating|score|index)?[:\s]+(\d)", t)
-    if m:
-        comedogen_score = int(m.group(1))
+    # Method 1: dedicated irritancy HTML element
+    for sel in ["[class*='irrit']","[class*='irritan']",".irrit",".irr-score"]:
+        for el in soup.select(sel):
+            m = re.search(r"(\d+(?:\.\d+)?)", el.get_text())
+            if m:
+                v = float(m.group(1))
+                if 0 <= v <= 5:
+                    irritancy_score = v; break
+
+    # Method 2: "irr." text pattern — first number before com.
+    if irritancy_score is None:
+        for pat in [
+            r"irr\.?\s*[:\-]?\s*(\d+(?:\.\d+)?)",
+            r"irritan[^\d\n]{0,20}?(\d+(?:\.\d+)?)",
+        ]:
+            m2 = re.search(pat, t, re.I)
+            if m2:
+                v = float(m2.group(1))
+                if 0 <= v <= 5:
+                    irritancy_score = v; break
+
+    # Convert numeric score to label
+    if irritancy_score is not None:
+        irritancy = "high" if irritancy_score >= 3 else "medium" if irritancy_score >= 1 else "low"
+    else:
+        # Fallback to keyword classification
+        irritancy = classify_irritancy(name)
+        if "high irritancy" in t or "strong irritant" in t:  irritancy = "high"
+        elif "moderate irritan" in t:                         irritancy = "medium" if irritancy != "high" else "high"
+
+    # ── Comedogenicity ────────────────────────────────────────────────────────
+    # INCIDecoder shows comedogenicity as a 0-5 number on the ingredient page.
+    # It appears in several possible locations in the HTML:
+    #   1. A span/div with class containing "comedogen" or "com"
+    #   2. In a table cell near the text "com." or "comedogenic"
+    #   3. As text pattern "X irr. / Y com." or "irr. X, com. Y"
+    comedogen_score = classify_comedogenicity(name)  # fallback
+
+    # Method 1: dedicated comedogenicity element
+    for sel in ["[class*='comedo']", "[class*='comedogen']", "[id*='comedo']",
+                ".comedo", ".comedogenic-score", ".com-score"]:
+        els = soup.select(sel)
+        for el in els:
+            m = re.search(r"(\d+(?:\.\d+)?)", el.get_text())
+            if m:
+                v = float(m.group(1))
+                if 0 <= v <= 5:
+                    comedogen_score = int(round(v)); break
+
+    # Method 2: look for "irr., com." pattern in page HTML
+    # INCIDecoder renders it as e.g. "0, 3" or "1 | 3" after "irr., com."
+    if comedogen_score == classify_comedogenicity(name):  # still at fallback
+        # Pattern: irritancy then comedogenicity, separated by comma or pipe
+        for pat in [
+            r"irr\.?,?\s*com\.?\s*[:\-]?\s*\d+[,\s/|]+\s*(\d+)",
+            r"irritan[^\d]*?(\d)\s*[,/|]\s*(\d)\s*com",
+            r"com(?:edogen)?[^\d]*?(\d+(?:\.\d+)?)",
+            r"(\d)\s*irr.*?(\d)\s*com",
+        ]:
+            m2 = re.search(pat, t, re.I)
+            if m2:
+                groups = [g for g in m2.groups() if g is not None]
+                v = float(groups[-1])  # last group = comedogenicity
+                if 0 <= v <= 5:
+                    comedogen_score = int(round(v)); break
+
+    # Method 3: look in table cells near "com" text
+    if comedogen_score == classify_comedogenicity(name):
+        for td in soup.find_all(["td", "th", "span", "div"]):
+            if "com" in td.get_text().lower()[:10]:
+                # Check next sibling or adjacent cell for number
+                nxt = td.find_next_sibling()
+                if nxt:
+                    m3 = re.search(r"(\d+(?:\.\d+)?)", nxt.get_text())
+                    if m3:
+                        v = float(m3.group(1))
+                        if 0 <= v <= 5:
+                            comedogen_score = int(round(v)); break
 
     return {
         "functions"       : "|".join(functions) if functions else "",
@@ -333,10 +430,16 @@ def run():
     # Resume support
     done = set()
     if os.path.exists(OUT_FILE):
-        ex   = pd.read_csv(OUT_FILE)
-        done = set(ex["query_name"].str.lower().tolist())
-        remaining = len(all_ingredients) - len(done)
-        print(f"Resuming — {len(done):,} done, {remaining:,} remaining")
+        ex = pd.read_csv(OUT_FILE)
+        if "query_name" in ex.columns:
+            done = set(ex["query_name"].dropna().str.lower().tolist())
+            print(f"Resuming — {len(done):,} done, {len(all_ingredients)-len(done):,} remaining")
+        elif "ingredient_name" in ex.columns:
+            done = set(ex["ingredient_name"].dropna().str.lower().tolist())
+            print(f"Resuming — {len(done):,} done (legacy column name)")
+        else:
+            print(f"Existing file columns: {list(ex.columns)} — backing up and starting fresh")
+            os.rename(OUT_FILE, OUT_FILE + ".bak")
 
     todo = [i for i in all_ingredients if i not in done]
     est_low  = len(todo) * 3 / 3600
@@ -348,11 +451,12 @@ def run():
     driver      = build_driver()
     restart_ctr = 0
     not_found   = []
+    items_this_session = 0
 
     try:
         for name in tqdm(todo, desc="INCIDecoder"):
-            restart_ctr += 1
-            if restart_ctr > 1 and restart_ctr % 40 == 0:
+            items_this_session += 1
+            if items_this_session > 1 and items_this_session % 40 == 0:
                 tqdm.write("  Restarting driver (memory management)...")
                 try: driver.quit()
                 except: pass

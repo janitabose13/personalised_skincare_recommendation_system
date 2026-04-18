@@ -76,6 +76,8 @@ COMEDOGENS  = ["coconut oil","isopropyl myristate","isopropyl palmitate","wheat 
                "cocoa butter","palm oil","soybean oil"]
 
 
+CHROMEDRIVER_PATH_OVERRIDE = "/Users/janita/chromedriver_new"
+
 def build_driver():
     v = None
     for cmd in ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome","google-chrome"]:
